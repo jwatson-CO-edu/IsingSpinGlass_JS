@@ -1,0 +1,307 @@
+<!-- 
+isingMagSim.htm
+James Watson, 2014 April
+Revisiting the Ising model of magnetization using the "GridSim" library
+Previous implementation is "isingModel.hta", note that this attempt takes the form of a webpage and is not dependent on Windows Script Host, as HTA was
+-->
+
+<html>
+<head>
+<title>Ising Magnetization</title>
+
+</head>
+
+<!-- 
+== LOG ==
+2014-05-31: * Value assigned to 'nuline' is determined based on the value of 'navigator.appName'
+            * Moved 'Grid.get_first', 'Grid.set_first' to "GridSim.js". These are considered general enough to be promoted to the library. Works.
+            * Changed 'update' such that each time it is called, a single random address is evaluated for a spin flip rather than every singe address.
+              This solved the issue of endless global spin flipping (See NOTES for this date) and also obviated the need to use a 'buffer' 'Grid'.
+            * Added 'dispclear' to "template.js"
+2014-05-19: * Added clause to 'Grid.print_block', such that a cell whose first index is not an allowed value is displayed as "E" for error
+            * In update, if the spin is not flipped, the 'block' state for the address is copied to 'buffer'
+            * 'buffer' had been assigned to 'block' too early, corrected
+2014-05-15: In 'update', attempted to access the address offset in 'DIRS'. This work was already being done by 'nhbr_addr'. Corrected
+2014-05-14: * Copied 'sim_data' from "isingModel.hta" and updated to present environment
+            * Wrote 'dispclear' to clear the display area before printing each timestep
+2014-05-13: * Refactored 'update' to use "GridSim" with specific extensions, eliminated temp variable 'gen'
+            * Copied a more general version of 'sep' from Learning/"inheritance_test.js"
+2014-05-09: * 'Grid.spin_at' returns the value at 'Cell.contents' index and the function return value is not settable
+            * Wrote 'Grid.get_first' (renamed 'Grid.spin_at'), 'Grid.set_first' and tested
+            * Copied 'update' function (time step) from "isingModel.hta", removed commented-out debug statements for clarity
+2014-05-02: * Copied simulation stats from "isingModel.hta"
+            * Copied 'give_params' from "isingModel.hta", updated with 'nuline' and current vars
+2014-05-01: * Added 'repeat_str', improved version of 'sep'
+            * Copied simulation environment variables from "isingModel.hta", changed to suit this implementation
+            * Copied simulation parameter variables from "isingModel.hta"
+
+== TODO ==
+* Unit test of access to Moore and Von Neumann neighborhoods
+* Change spin representations to Unicode arrows
+
+== NOTES ==
+2014-05-31: * Does not seem to stabilize within 1351000 steps, is continuously flipping
+            * It is apparent that the simulation will never settle, especially in cases where the random initial construction has a checkerboard-like
+              quality that has almost every cell has a neighborhood of spins that are different from its own.  All cells switch state, and in the next
+              step each cell once again finds itself in a neighborhood of differently-spun cells, and is set up to flip next step also. Better to
+              implement the random-cell selected Monte Carlo method described in "isingPhaseTransition.pdf"
+2014-05-20: Does not seem to stabilize within several hundred steps
+
+-->
+
+<body>
+
+	<!-- Displays for writing -->
+	<pre id="display"></pre>
+	<pre id="debug"></pre>
+
+	<!-- "Buttons" for New/Pause/Resume -->
+	<font color="#0000FF">
+	<A onclick="javascript:nu_sim()">New Simulation</A>
+	</font>
+
+	<br>
+
+	<font color="#0000FF">
+	<A onclick="javascript:restart()">Resume Simulation</A>
+	</font>
+
+	<br>
+
+	<font color="#0000FF">
+	<A onclick="javascript:pause()">Pause Simulation</A>
+	</font>
+
+</body>
+
+
+<script type="text/javascript" src="GridSim.js"></script>
+
+
+
+
+<script type="text/javascript">
+	
+	// == Init Writing to Page ==
+	var preDebug = document.createTextNode(""); // Create textNodes and create vars to reference them
+	var preDisplay = document.createTextNode("");
+	document.getElementById('debug').appendChild(preDebug);	// Attach textNodes under <PRE> tags for monospace formatting
+	document.getElementById('display').appendChild(preDisplay);
+	// == End Writing ==
+
+	// == Demo Helper Functions ==
+	var nuline = (navigator.appName === "Netscape") ? "\n" : "\r"; // Set-able newline char to handle differences between browsers!
+	// Some useful functions to use when writing a script for the windows console
+	function display(a){ preDisplay.data += String(a); } // Convert 'a' to string and write to the display node
+	// Convert 'a' to string and write to console with a newline
+	function displayln(a){ preDisplay.data = preDisplay.data + String(a) + nuline; } 
+	function displaycon(a){ console.log( String(a) ); } // Convert 'a' to string and print to console
+	function repeat_str(pattern, count){ return ( count <= 0 ? "" : pattern + repeat_str(pattern, count - 1) ); } // return string 'pattern' X 'count'
+	function sep(title, padChar, sepLen){ // Write a handy separating line to the console preceded and followed by newlines, title optionally inserted in middle
+		var titleStr = title || "", pad = padChar || "=", stanLen = sepLen || 33, sepStr = ""; // init title, standard len, separator string empty
+		titleStr = String(titleStr); //URL: http://www.w3schools.com/jsref/jsref_string.asp // coerce string if other than string
+		if(titleStr.length > stanLen){ titleStr = titleStr.slice(0, stanLen); }
+		sepStr = "\n" + repeat_str(pad, Math.floor((stanLen - titleStr.length)/2)) + titleStr + 
+			repeat_str(pad, Math.ceil((stanLen - titleStr.length)/2)) + "\n";
+		displayln( sepStr ); // display the separator string
+	}
+	function dispclear(){ preDisplay.data = ""; } // set 'preDisplay.data' to an empty string
+	// == End Helper ==
+
+	//displayln("test1"); displayln("test2"); sep(); displayln("test3"); // browser test of display functions
+
+	
+
+	// == Simulation Specific Functions ==
+
+	function give_params(){ // text report of the overall simulation state
+		var rtnStr = "";
+		rtnStr = rtnStr + "Block Size: " + XDIM + "," + YDIM + nuline;
+		rtnStr = rtnStr + "Temperature: " + TEMPERATURE + nuline;
+		rtnStr = rtnStr + "beta [1/T]: " + beta + nuline;
+		rtnStr = rtnStr + repeat_str("=",XDIM);
+		return rtnStr + nuline;
+	}
+
+	function random_board(){ // for every 'Cell' in 'block', assign -1 or 1 based on random roll. Assumes 'Cell.contents' is empty
+		for(var i = 0; i < XDIM; i++){ // for every XADR
+			for(var j = 0; j < YDIM; j++){ // for every YADR
+				( Math.random() < 0.5) ? block.set_first([i,j], -1) : block.set_first([i,j],1);
+			}
+		}
+	}
+
+	// = Specific Grid Extension =
+	
+
+
+	Grid.prototype.print_block = function(){ // return a string that represents the simulated block, rows separated by 'nuline's
+		var rtnStr = "";
+		for(var j = 0; j < this.dims[YADR]; j++){ // for every YADR (row)
+			for(var i = 0; i < this.dims[XADR]; i++){ // for every XADR (column) along this YADR
+				(this.get_first([i,j]) === -1) ? rtnStr += "v" : // print downspin if cell value -1, upspin if 1, otherwise error "E"
+					(this.get_first([i,j]) === 1) ? rtnStr += "^" : rtnStr += "E"; 
+				rtnStr += " "; // pad our horizontally for better spacing within <PRE> tag
+			}
+			rtnStr += nuline; // end every row with a newline
+		}
+		return rtnStr;
+	}
+
+	// = End Extension =
+
+	// == End Specific ==
+
+	// == Test Functions ==
+
+	/*
+	var spins = new Grid( [2,2] );
+
+	for(var i = 0; i < 2; i++){ // for every XADR
+		for(var j = 0; j < 2; j++){ // for every YADR
+			spins.set_first([i,j],-1);
+		}
+	}
+
+	displayln( spins.print_block() );
+
+	for(var i = 0; i < 2; i++){ // for every XADR
+		for(var j = 0; j < 2; j++){ // for every YADR
+			spins.fetch([i,j])[0] = 1;
+		}
+	}
+
+	sep();
+
+	displayln( spins.print_block() );
+	*/
+
+	// == End Test ==
+
+	// == Simulation Environment Variables ==
+	var XDIM = 9; var YDIM = 9; // --------- Dimensions for 2D block of material
+	var block = new Grid( [XDIM,YDIM] ); //  New simulation 'Grid' with the above dimensions
+	var buffer = new Grid( [XDIM,YDIM] ); // Holds the next step in the simulation
+	var temp; // --------------------------- Swap variable for 'block' and 'buffer'
+	var stepsPerFrame = 10; // ------------- Number of steps to advance between screen repaints
+	//var coinToss; // --------------------- Temp var to determine cell state
+	// == End Sim Vars ==
+
+	// == Simulation Parameters ==
+	// Since we normalized the absolute energies out of the equation, temperature measured in absolute Kelvin
+	//no longer has a meaning
+	var TEMPERATURE = 0.65;
+	var k = 1.3806503 * Math.pow(10,-23); // Boltzmann constant in Joules per Kelvin
+	// Compute the inverse temperature in units of Boltzmann constants
+	// Since k relates to the per-particle energy at a temperature, we drop it by expressing energy in whole units
+	var beta = 1 / (TEMPERATURE);
+	// == End Params ==
+
+	// == Simulation Statistics ==
+	var steps = 0;
+	var avgSpin = 0;
+	var avgPSpon = 0;
+	var nPSpon = 0;
+	// == End Statistics ==
+
+	function update(){ 
+
+		var spinSum, dEnergy, query, P_flip, buffer; // declare sim vars
+
+		for(var repeat = 0; repeat < stepsPerFrame; repeat++){
+	
+			spinSum = 0;
+			dEnergy = 0;
+			avgSpin = 0;
+			avgPSpon = 0;
+			P_flip = 0;
+			//buffer = new Grid( [XDIM,YDIM] ); // Holds the next step in the simulation
+
+			//for(var i = 0; i < XDIM; i++){ // for each XADR
+				//for(var j = 0; j < YDIM; j++){ // for each YADR
+				
+				var chosenAddr = block.rand_addr();
+				var i = chosenAddr[0], j = chosenAddr[1];
+				
+					// reset accounting for this cell
+					spinSum = 0;
+					dEnergy = 0;	
+
+					// compute the energy change resulting from flipping the spin of this cell
+					for(var n = 0; n < VONNEUMANNN.length; n++){
+						// For each closest neighbor in the Von Neumann neighborhood, attempt fetch
+						query = block.fetch( block.nhbr_addr([i,j], VONNEUMANNN[n]) ); // calculate a neighbor address, if it exists
+						if( query !== undefined ){ // If address is valid, add it to the sum
+							spinSum += query[0];
+						}
+					}
+					dEnergy = 2 * block.get_first([i,j]) * spinSum; // compute the dimensionless energy change for a flipped spin
+				
+					if(dEnergy <= 0){ // If there is a net zero or less energy change, flip the spin and assign to buffer
+						//buffer.set_first( [i,j] , -1 * block.get_first([i,j]) );
+						block.set_first( [i,j] , -1 * block.get_first([i,j]) );
+					}else{ // else, roll the dice to see if the particle energy overcomes barrier to flip its spin
+						P_flip = Math.exp(-1 * beta * dEnergy); // calculate energy barrier
+						if(Math.random() < P_flip){ // if diceroll exceeds barrier
+							nPSpon++;
+							avgPSpon += Math.exp(-1 * beta * dEnergy);
+							//buffer.set_first( [i,j] , -1 * block.get_first([i,j]) ); // flip the spin and assign to buffer
+							block.set_first( [i,j] , -1 * block.get_first([i,j]) ); // flip the spin and assign to buffer
+
+						}//else{ buffer.set_first( [i,j] , block.get_first([i,j]) ); } // else make sure buffer has unflipped spin
+					}
+					avgSpin += block.get_first([i,j]);
+				//}
+			//}
+			// Swap 'block' and 'buffer'
+			//temp = block;
+			//block = buffer;
+			//buffer = temp;
+			// Per-Step analysis
+			steps++;
+			avgSpin /= XDIM * YDIM;
+			avgPSpon /= nPSpon;
+		}
+		// Update display
+		dispclear();
+		displayln( give_params() );
+		displayln( block.print_block() );
+		displayln( sim_data() );
+
+	}
+
+	function sim_data(){ 
+		var rtnStr = "";
+		rtnStr += "Steps: " + steps + nuline;
+		rtnStr += "Average Spin: " + avgSpin + nuline;
+		rtnStr += "Average P(Energy Increase): " + avgPSpon + nuline;
+		return rtnStr;
+	}
+
+	// FIXME: Copied code needs to be updated!
+
+	random_board(); // init the board with a completely random spin configuration
+	displayln( block.print_block() ); // works
+	displayln(navigator.appName);
+	//simParams.innerText = give_params();
+	//appDisplay.innerText = block.print_string();
+
+	// == Simulation Controls ==
+
+	var timer;// = setInterval(update, 500); // set up a time to 'update' sim/display every 500ms
+	function pause(){ clearInterval(timer); } // cease interval calls to 'update'
+	function restart(){ clearInterval(timer); timer = setInterval(update, 500); } // clear timer, set up timer again for calls to 'update'
+	function nu_sim(){
+		clearInterval(timer); // stop any current simulations
+		random_board(); // set the 'block' to random spins
+		//simParams.innerText = give_params();
+		//appDisplay.innerText = block.print_string();
+		timer = setInterval(update, 500); // begin simulating
+	}
+
+	// == End Controls ==
+</script>
+
+
+
+</html>
